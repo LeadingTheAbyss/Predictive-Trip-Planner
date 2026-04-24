@@ -2,27 +2,24 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-import requests
-import os
 import math
 
-app = FastAPI(title = "When-To-Go API")
+app = FastAPI(title="When-To-Go API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = ["*"], 
-    allow_credentials = True,
-    allow_methods = ["*"],
-    allow_headers = ["*"],
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "YOUR_API_KEY_HERE")
 class TripRequest(BaseModel):
     origin: str
     destination: str
-    
-def generate_time_slots(hours_ahead = 4, interval_mins = 30):
-    """Generates future time slots as Unix timestamps."""
+
+def generate_time_slots(hours_ahead=4, interval_mins=30):
+    """Generates future time slots as datetime objects."""
     slots = []
     now = datetime.now()
     discard_minutes = now.minute % interval_mins
@@ -32,59 +29,69 @@ def generate_time_slots(hours_ahead = 4, interval_mins = 30):
         target_time = next_slot + timedelta(minutes=interval_mins * i)
         slots.append({
             "readable_time": target_time.strftime("%I:%M %p"),
-            "timestamp": int(target_time.timestamp())
+            "dt_object": target_time 
         })
     return slots
 
-def get_travel_time(origin: str, destination: str, departure_time: int):
-    """Calls Google Maps Distance Matrix API."""
-    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-    params = {
-        "origins": origin,
-        "destinations": destination,
-        "departure_time": departure_time, 
-        "key": API_KEY,
-        "mode": "driving"
-    }
+def get_mock_travel_time(origin: str, destination: str, dt_object: datetime):
+    """Simulates travel time based on length of text and rush hours."""
+    base_time = len(origin) + len(destination) + 15 
     
-    response = requests.get(url, params=params)
-    data = response.json()
+    hour = dt_object.hour
+    # Rush hour penalty (8-10 AM, 5-7 PM)
+    if hour in [8, 9, 17, 18, 19]:
+        return base_time + 25 
+    return base_time
+
+def get_heuristic_crowd_score(dt_object: datetime):
+    """Returns a simulated crowd score from 1 (empty) to 10 (packed)."""
+    score = 2 
+    hour = dt_object.hour
     
-    if data['status'] == 'OK' and data['rows'][0]['elements'][0]['status'] == 'OK':
-        element = data['rows'][0]['elements'][0]
-        travel_time_seconds = element.get('duration_in_traffic', element['duration'])['value']
-        return travel_time_seconds // 60 
-    else:
-        return None
+    # Weekend penalty
+    if dt_object.weekday() >= 5:
+        score += 3
+        
+    # Time of day penalty
+    if 18 <= hour <= 21: 
+        score += 4
+    elif 12 <= hour <= 17: 
+        score += 2
+        
+    return min(score, 10) 
 
 @app.post("/plan-trip")
 def plan_trip(request: TripRequest):
-    if API_KEY == "YOUR_API_KEY_HERE":
-        raise HTTPException(status_code=500, detail="Google Maps API key not configured.")
-
     slots = generate_time_slots(hours_ahead=4)
     results = []
+    
+    ALPHA = 3 
 
     for slot in slots:
-        duration = get_travel_time(request.origin, request.destination, slot["timestamp"])
-        if duration is not None:
-            results.append({
-                "time_slot": slot["readable_time"],
-                "estimated_travel_time_mins": duration,
-            })
-            
-    if not results:
-        raise HTTPException(status_code=400, detail="Could not fetch route data. Check locations.")
+        travel_time = get_mock_travel_time(request.origin, request.destination, slot["dt_object"])
+        crowd_score = get_heuristic_crowd_score(slot["dt_object"])
+        
+        total_penalty_score = travel_time + (ALPHA * crowd_score)
 
-    results.sort(key=lambda x: x["estimated_travel_time_mins"])
+        results.append({
+            "time_slot": slot["readable_time"],
+            "estimated_travel_time_mins": travel_time,
+            "crowd_level": crowd_score,
+            "penalty_score": total_penalty_score
+        })
 
-    best_time = results[0]["estimated_travel_time_mins"]
+    results.sort(key=lambda x: x["penalty_score"])
+
+    best_score = results[0]["penalty_score"]
     for res in results:
-        if res["estimated_travel_time_mins"] <= best_time + 5: 
+        if res["penalty_score"] <= best_score + 10: 
             res["status"] = "BEST"
-        elif res["estimated_travel_time_mins"] <= best_time + 15:
+            res["insight"] = "Optimal balance of low traffic and fewer crowds."
+        elif res["penalty_score"] <= best_score + 25:
             res["status"] = "OK"
+            res["insight"] = "Expect moderate delays or heavier foot traffic."
         else:
             res["status"] = "AVOID"
+            res["insight"] = "Peak congestion. Leaving now is highly inefficient."
 
     return {"recommendations": results}
