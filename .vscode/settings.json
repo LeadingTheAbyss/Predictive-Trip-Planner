@@ -1,0 +1,28 @@
+{
+  "editor.fontFamily": "Consolas, 'Courier New', monospace",
+  "editor.fontSize": 14,
+  "editor.fontWeight": "normal",
+  "editor.lineHeight": 0,
+  "editor.letterSpacing": 0,
+  "terminal.integrated.fontFamily": "Consolas, 'Courier New', monospace",
+  "terminal.integrated.fontSize": 14,
+  "editor.fontLigatures": false,
+  "editor.tokenColorCustomizations": {
+    "textMateRules": [
+      {
+        "scope": [
+          "comment",
+          "keyword",
+          "storage.type",
+          "storage.modifier",
+          "variable.language",
+          "entity.name.type",
+          "entity.other.attribute-name"
+        ],
+        "settings": {
+          "fontStyle": ""
+        }
+      }
+    ]
+  }
+}

@@ -1,17 +1,20 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import math
 
-app = FastAPI(title="When-To-Go API")
+from sqlalchemy.orm import Session
+from database import SessionLocal, TripLog
+
+app = FastAPI(title = "When-To-Go API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins = ["*"], 
+    allow_credentials = True,
+    allow_methods = ["*"],
+    allow_headers = ["*"],
 )
 
 class TripRequest(BaseModel):
@@ -19,14 +22,13 @@ class TripRequest(BaseModel):
     destination: str
 
 def generate_time_slots(hours_ahead=4, interval_mins=30):
-    """Generates future time slots as datetime objects."""
     slots = []
     now = datetime.now()
     discard_minutes = now.minute % interval_mins
     next_slot = now + timedelta(minutes=(interval_mins - discard_minutes))
     
     for i in range(math.ceil((hours_ahead * 60) / interval_mins)):
-        target_time = next_slot + timedelta(minutes=interval_mins * i)
+        target_time = next_slot + timedelta(minutes = interval_mins * i)
         slots.append({
             "readable_time": target_time.strftime("%I:%M %p"),
             "dt_object": target_time 
@@ -34,34 +36,32 @@ def generate_time_slots(hours_ahead=4, interval_mins=30):
     return slots
 
 def get_mock_travel_time(origin: str, destination: str, dt_object: datetime):
-    """Simulates travel time based on length of text and rush hours."""
     base_time = len(origin) + len(destination) + 15 
-    
     hour = dt_object.hour
-    # Rush hour penalty (8-10 AM, 5-7 PM)
     if hour in [8, 9, 17, 18, 19]:
         return base_time + 25 
     return base_time
 
 def get_heuristic_crowd_score(dt_object: datetime):
-    """Returns a simulated crowd score from 1 (empty) to 10 (packed)."""
     score = 2 
     hour = dt_object.hour
-    
-    # Weekend penalty
     if dt_object.weekday() >= 5:
         score += 3
-        
-    # Time of day penalty
     if 18 <= hour <= 21: 
         score += 4
     elif 12 <= hour <= 17: 
         score += 2
-        
     return min(score, 10) 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 @app.post("/plan-trip")
-def plan_trip(request: TripRequest):
+def plan_trip(request: TripRequest, db: Session = Depends(get_db)): 
     slots = generate_time_slots(hours_ahead=4)
     results = []
     
@@ -70,7 +70,6 @@ def plan_trip(request: TripRequest):
     for slot in slots:
         travel_time = get_mock_travel_time(request.origin, request.destination, slot["dt_object"])
         crowd_score = get_heuristic_crowd_score(slot["dt_object"])
-        
         total_penalty_score = travel_time + (ALPHA * crowd_score)
 
         results.append({
@@ -81,8 +80,22 @@ def plan_trip(request: TripRequest):
         })
 
     results.sort(key=lambda x: x["penalty_score"])
+    
+    best_slot = results[0]
 
-    best_score = results[0]["penalty_score"]
+    db_log = TripLog(
+        origin = request.origin,
+        destination = request.destination,
+        recommended_time_slot = best_slot["time_slot"],
+        predicted_travel_time = best_slot["estimated_travel_time_mins"],
+        heuristic_crowd_score = best_slot["crowd_level"],
+        penalty_score = best_slot["penalty_score"]
+    )
+    db.add(db_log)
+    db.commit()
+    db.refresh(db_log) 
+
+    best_score = best_slot["penalty_score"]
     for res in results:
         if res["penalty_score"] <= best_score + 10: 
             res["status"] = "BEST"
@@ -94,4 +107,7 @@ def plan_trip(request: TripRequest):
             res["status"] = "AVOID"
             res["insight"] = "Peak congestion. Leaving now is highly inefficient."
 
-    return {"recommendations": results}
+    return {
+        "trip_id": db_log.id, 
+        "recommendations": results
+    }
